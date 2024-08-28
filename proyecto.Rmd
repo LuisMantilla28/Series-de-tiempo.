@@ -1,0 +1,986 @@
+---
+title: "Proyecto Teoria de series de tiempo univariadas"
+author: 'Luis Mantilla, Bryam Bustos y Pedro Leal '
+date: "2024-03-04"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Subir datos
+
+```{r}
+library(forecast)
+library(lubridate)
+library(readr)
+datos_inflacion <- read_csv("datos_inflacion.csv")
+
+
+datos <- data.frame(
+  Fecha = seq(as.Date("1993-01-01"), by = "month", length.out = 373),
+  Valor = rev(datos_inflacion$Inflación)
+  )
+
+
+
+inflacion <- ts(datos$Valor, start = c(year(datos$Fecha[1]), month(datos$Fecha[1])), frequency = 12)
+
+plot(inflacion, ylab="Variación porcentual anual del IPC (Inflación)", xlab="Periodo")
+```
+
+# Estabilización de la Varianza
+
+A continuación se calculará diferentes lambdas para la transformación:
+
+-   Lambda1: Metodo loglik
+
+-   Lambda2: Guerrero
+
+-   Lambda3: Por intervalo
+
+```{r}
+library(MASS)
+
+Lamda1= forecast::BoxCox.lambda(inflacion, method ="loglik", lower = -1, upper = 3)
+Lamda2= forecast::BoxCox.lambda(inflacion, method ="guerrero", lower = -1, upper = 4)
+
+
+
+resultado_boxcox <- boxcox(lm(inflacion ~ 1))
+Lamda3<- resultado_boxcox$x[which.max(resultado_boxcox$y)]
+```
+
+Los resultados son:
+
+-   Lambda1=`r Lamda1`
+
+-   Lambda2=`r Lamda2`
+
+-   Lambda3=`r Lamda3`
+
+Comparación gráfica de la estabilización de la varianza con distintos $\lambda$s.
+
+```{r}
+graf1=forecast::BoxCox(inflacion,lambda=Lamda1)
+graf2=forecast::BoxCox(inflacion,lambda=Lamda2)
+graf3=forecast::BoxCox(inflacion,lambda=Lamda3)
+
+vinflacion=graf1
+
+plot(inflacion, ylab="%")
+lines(graf2, col="red")
+lines(graf1, lwd=2, col="blue")
+lines(graf3,lwd=2, col="green")
+legend("topright", legend = c("λ = 0", "λ = 0.74","λ = -0.14", "Original"), col = c("blue", "red","green", "black"), lty = 1)
+```
+
+Observemos que la transformación que estabiliza mejor la varianza es precisamente cuando $\lambda=-0.14$. Sin embargo la gráfica azul y la verde no se diferencia mucho, entonces por velocidad de computo vamos a escoger $\lambda=0$.
+
+# Análisis de la tendencia y su correspondiente eliminación.
+
+## Apliquemos diferencia ordinaria :
+
+```{r}
+dx=diff(vinflacion)
+plot.ts(dx, main="Serie Diferenciada", ylab='')
+```
+
+Ahora suavisamiento por kernel.
+
+```{r}
+plot(vinflacion, ylab="%")
+lines(ksmooth(time(vinflacion), vinflacion, "normal", bandwidth=1), lwd=2, col=4) # el normal
+legend("topright", legend = c("Original", "Tendencia"), col = c("black", "blue"), lty = 1)
+```
+
+Nota: En la anterior gráfica la serie original hace referencia a la serie con varianza estabilizada.
+
+Ahora quitemos la tendencia:
+
+```{r}
+tendencia=ksmooth(time(vinflacion), vinflacion, "normal", bandwidth=1)
+
+t_v_inflacion=vinflacion - tendencia$y
+
+ker_vinflacion=t_v_inflacion
+dif_vinflacion=dx
+
+
+plot(dx, ylab="%", col="red")
+lines(t_v_inflacion, lwd=2, col=4) # el normal
+legend("topright", legend = c("Dif Ordinaria", "Kernel"), col = c("red", "blue"), lty = 1)
+```
+
+A continuación se estudiará la estacionalidad de las dos series suavizadas usando los dos métodos por separado.
+
+### ACF
+
+Ahora veamos la función de auto-correlación pero solo veremos los lags de 1 a 36 meses, ya que un periodo más grande carecen de sentido practico:
+
+Kernel:
+
+```{r}
+acf(ker_vinflacion,ci = 0.95,ci.type = "white",lag.max = 36) 
+```
+
+Observamos correlación lineal entre los lags 1 y cuando el lag es de 12 meses.
+
+Diferencia ordinaria:
+
+```{r}
+acf(dif_vinflacion,ci = 0.95,ci.type = "white",lag.max =36)
+```
+
+En este caso también observamos una correlación baja pero a tener en cuenta en el lag 1 y 12.
+
+### PACF
+
+Kernel:
+
+```{r}
+pacf(ker_vinflacion,ci = 0.95,ci.type = "white",lag.max = 36) 
+```
+
+Aquí como en la anterior vemos una correlación parcial en el lag 1.
+
+Diferencia ordinaria:
+
+```{r}
+pacf(dif_vinflacion,ci = 0.95,ci.type = "white",lag.max = 36) 
+```
+
+Aquí observamos una correlación parcial en el lag 12.
+
+## Gráficas de regresión
+
+### Gráficas de regresión usando base de datos con Kernel
+
+```{r}
+astsa::lag1.plot(ker_vinflacion, 20)
+```
+
+En las anteriores gráficas observamos que hay una relación directa entre los meses con lag 1, esto quiere decir que si en un mes la inflación es alta el siguiente mes también será alta. Además en el lag 12 observamos una relación inversa y considerable (40%) esto quiere decir que si en un mes de determinado año la inflación es alta, en el mismo mes del próximo año la inflación bajará, esto ultimo puede ser explicado a que el banco de la república toma medidas para estabilizar la inflación.
+
+### Gráficas de regresión usando base de datos con diferencia ordinaria
+
+```{r}
+astsa::lag1.plot(dif_vinflacion, 20)
+```
+
+en esta no vemos una relación tan alta como en la anterior. Pero es similar.
+
+# Indice AMI
+
+### Indice AMI: Kernel
+
+```{r}
+g=nonlinearTseries::mutualInformation(ker_vinflacion,lag.max = 36,n.partitions = 50,units = "Bits",do.plot = TRUE)
+```
+
+### Indice AMI: Diferencias ordinarias
+
+```{r}
+G=nonlinearTseries::mutualInformation(dif_vinflacion,lag.max = 36,n.partitions = 50,units = "Bits",do.plot = TRUE)
+```
+
+veamos que en el indice de AMI no muestra patrón de correlaciones.
+
+# Estacionalidad
+
+### Periodograma de kernel:
+
+```{r}
+Periodgrama_ker_vinflacion=spectrum(as.numeric(ker_vinflacion))
+```
+
+### Periodograma de la diferencia ordinaria:
+
+```{r}
+Periodgrama_def_vinflacion=spectrum(as.numeric(dif_vinflacion))
+```
+
+Observemos que el periodograma usando la suavización de diferencias ordinarias o por Kerne no muestran ninguna frecuencia representativa.
+
+Sin embargo observemos los datos suavizados con diferentes frecuencias con la suavización del Kernel, debido a que esta suavización no penaliza tanto a la estacionalidad en comparación con las diferencia ordinarias:
+
+```{r}
+
+# mensual cada año
+inflacionprueba <- ts(ker_vinflacion, frequency =12)
+monthplot(inflacionprueba)
+```
+
+```{r}
+ggseasonplot(inflacionprueba)
+```
+
+Observemos que no hay estacionalidad en la serie.
+
+Dado que la serie no presenta estacionalidad entonces podemos pasar de inmediato a un suavizado exponencial para predecir.
+
+# Suavizado exponencial:
+
+Dado que al hacer el box-cox se realizó con $\lambda=0$ y como presenciamos tendencia pero no estacionalidad entonces debemos realizar el suavizado con gamma=FALSE. Entonces se realizará un rolling de un paso adelante y testearlo con los últimos 36 datos (últimos 3 años):
+
+Separemos en datos de prueba y test
+
+```{r}
+n=length(vinflacion)
+
+
+test=tail(inflacion,36)
+
+```
+
+hagamos el rolling un paso adelante
+
+```{r}
+pronosticos=c()
+```
+
+```{r}
+for (i in 1:36){
+  k=n-37+i
+  HWAP_inic=stats::HoltWinters(vinflacion[1:k],alpha=NULL,beta=NULL,gamma=FALSE)
+  pronostico=as.list(forecast::forecast(HWAP_inic,h=1,level =0.95,lambda = 0)$mean[1])$fit
+  pronosticos=c(pronosticos,pronostico)
+}
+```
+
+```{r}
+pronosticos
+```
+
+Calculemos el error cuadratico medio
+
+```{r}
+# Paso 1: Calcular los residuos
+residuos <- test- pronosticos
+
+# Paso 2: Cuadrar los residuos
+residuos_cuadrados <- residuos^2
+
+# Paso 3: Calcular el ECM
+ecm <- mean(residuos_cuadrados)
+
+# Imprimir el resultado
+print(ecm)
+```
+
+Veamos que el R\^2 es 0.22.
+
+```{r}
+# Graficar ts_data
+plot(test, type = "l", col = "blue", lwd = 2, ylim = range(c(test, pronosticos)),xlab = "Tiempo", ylab = "Valor", main = "Gráfica de Datos")
+lines(time(test)[1:length(pronosticos)],pronosticos, col = "red", lwd = 2)
+
+```
+
+# Arboles de decisión
+
+#### HiperParametros:
+
+-   Lags
+
+-   Profundidad maxima
+
+A continuación se realizará un modelado usando arboles decisión que pronostique un paso adelante, primero observemos que los datos que se usaran para entrenar (1993-2020) están en un rango de 2 a 25 y los datos para el test están contenidos en este rango, esto quiere decir que el modelo de arboles no estaría limitado por el conjunto de entrenamiento.
+
+```{r}
+plot(inflacion )
+```
+
+Paso intermedio para pasar la serie de tiempo a Python:
+
+```{r}
+library(reticulate)
+
+inflacion_df <- data.frame(fecha= time(inflacion), data= as.numeric(inflacion))  
+
+
+#Pasamos a python
+inflacion_df_py <- r_to_py(inflacion_df )
+
+
+
+```
+
+```{python}
+import pandas as pd
+
+# Convertir el objeto rpy2 a pandas DataFrame
+inflacion_pd = r.inflacion_df_py 
+
+dates = pd.date_range(start='1993-01-01', end='2024-01-01', freq='MS')
+
+inflacion_pd.fecha=dates
+
+# Mostrar las primeras filas del DataFrame
+inflacion_pd.head()
+
+```
+
+Seguimos ahora a usar Python para el modelos de arboles de decisión:
+
+```{python}
+
+#librerias
+
+# Data manipulation
+# ==============================================================================
+import numpy as np
+import pandas as pd
+
+# Plots
+# ==============================================================================
+import matplotlib.pyplot as plt
+plt.style.use('fivethirtyeight')
+plt.rcParams['lines.linewidth'] = 1.5
+plt.rcParams['font.size'] = 10
+
+# Modeling and Forecasting
+# ==============================================================================
+from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import Lasso
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_absolute_error
+from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeRegressor
+
+from skforecast.ForecasterAutoreg import ForecasterAutoreg
+from skforecast.ForecasterAutoregCustom import ForecasterAutoregCustom
+from skforecast.ForecasterAutoregDirect import ForecasterAutoregDirect
+from skforecast.model_selection import grid_search_forecaster
+from skforecast.model_selection import backtesting_forecaster
+from skforecast.utils import save_forecaster
+from skforecast.utils import load_forecaster
+
+# Warnings configuration
+# ==============================================================================
+import warnings
+# warnings.filterwarnings('ignore')
+
+```
+
+Para mas información visitar [Link](https://cienciadedatos.net/documentos/py27-forecasting-series-temporales-python-scikitlearn.html)
+
+```{python}
+
+
+# Configurar la columna 'Fecha' como índice del DataFrame
+inflacion_pd = inflacion_pd.set_index('fecha')
+
+# Ajustar la frecuencia de la serie temporal a mensual
+inflacion_pd = inflacion_pd.asfreq('MS')
+
+# Renombrar la columna 'lluvia' a 'yprecip'
+inflacion_pd = inflacion_pd.rename(columns={'data':'yprecip'})
+
+# Mostrar las primeras filas del DataFrame
+inflacion_pd.head()
+```
+
+Verifiquemos que tengamos todos los datos:
+
+```{python}
+print(f'Numero de filas con valores faltantes: {inflacion_pd.isnull().any(axis=1).mean()}')
+
+```
+
+Vamos a establecer que los últimos 3 años (36 meses) sean usando para medir la capacidad predictiva
+
+```{python}
+steps = 36
+
+#Dado  que quiero que sean anos completo, voy a quitar el ultimo registro, el cual #es el primer mes del 2024
+
+#ker_vinflacion_pd = ker_vinflacion_pd.iloc[:-1]
+
+data_train = inflacion_pd[:-steps]
+data_test  = inflacion_pd[-steps:]
+
+print(f"Train dates : {data_train.index.min()} --- {data_train.index.max()}  (n={len(data_train)})")
+print(f"Test dates  : {data_test.index.min()} --- {data_test.index.max()}  (n={len(data_test)})")
+
+fig, ax = plt.subplots(figsize=(7, 2.5))
+data_train['yprecip'].plot(ax=ax, label='train')
+data_test['yprecip'].plot(ax=ax, label='test')
+ax.legend();
+```
+
+Vamos a crear un modelos a través de la clase ForecasterAutoreg, el cual es entrenado usando DecisionTreeRegressor.
+
+## Clase ForecasterAutoreg:
+
+Ver como se entrena el modelo: [Link](https://cienciadedatos.net/documentos/py27-forecasting-series-temporales-python-scikitlearn.html)
+
+### Hallar hiperparametros optimos:
+
+A continación se realizará un modelo que prediga un mese adelante, se usará la clase ForecasterAutoreg. Primeramente vamos a buscar la mejor combinación de retardos e hiperparámetros del modelo de árboles por medio de la función grid_search_forecaster. También hace random search y Bayesian search. Se hace Backtesting para validar la capacidad predictiva que tienen los modelos bajo los hiperparámetros propuestos. Se puede hacer validación cruzada o la tradicional entrenamiento y prueba. En este ejemplo se hace validación cruzada secuencial. Vale la pena recordar que validación cruzada se hace sobre el mismo conjunto de entrenamiento, lo cual es diferente al caso de tener un conjunto de validación. Pero en el caso de tener conjunto de validación se debe tener en cuenta, por favor chequear <https://skforecast.org/0.4.3/notebooks/prediction-intervals.html> y debe incorporarse el conjunto de validación al de entrenamiento.
+
+```{python}
+#verificar que lso datos tengan frecuencia mensual y las fechas esten bien
+print(data_train.index)
+print(data_train['yprecip'].index)
+```
+
+```{python}
+
+import warnings
+
+
+warnings.simplefilter('ignore'
+) #para ignorar advertencia de sobrecomputo
+# Hyperparameter Grid search
+# ==============================================================================
+steps = 1 #paso a predecir
+forecaster = ForecasterAutoreg(
+                regressor = DecisionTreeRegressor(random_state= 0),
+                lags      = 2 # This value will be replaced in the grid search
+             )
+
+# Lags used as predictors
+lags_grid = [3,5,6,7]
+
+# Regressor's hyperparameters
+param_grid = { 'max_depth': [1,2,3,4,5,6,7,8,9,10]}
+
+results_grid = grid_search_forecaster(
+                        forecaster         = forecaster,
+                        y                  = data_train['yprecip'],
+                        param_grid         = param_grid,
+                        lags_grid          = lags_grid,
+                        steps              = steps,
+                        refit              = True,
+                        metric             = 'mean_squared_error',
+                        initial_train_size = int(len(data_train)*0.5),
+                        fixed_train_size   = False,
+                        return_best        = True,
+                        verbose            = False #TRue  para mostrar todo el proceso
+               )
+```
+
+La conclusión es que el mejor, son los lags hasta 5 y una profundidad máxima de 8:
+
+```{python}
+# Grid Search results
+# ==============================================================================
+results_grid
+```
+
+### Modelo Final
+
+En la búsqueda hecha anteriormente se encontró la combinación óptima de los hiperparámetros por medio de validación cruzada secuencial para la predicción 12 pasos adelante por ejemplo. Con los hiperparametros optimos encontrados anteriormente lags hasta 5 y una profundidad máxima de 8.
+
+```{python}
+# Create and train forecaster with the best hyperparameters
+# ==============================================================================
+max_depth=8
+lags=5
+
+regressor = DecisionTreeRegressor(max_depth=max_depth)
+                
+
+forecaster = ForecasterAutoreg(
+                regressor = regressor,
+                lags      = lags
+             )
+
+forecaster.fit(y=data_train['yprecip'])
+
+Final_Forecaster=forecaster
+```
+
+Como el modelo me pronostica un paso adelante, entonces vamos a usar los datos de prueba para ver el riesgo empírico, para esto vamos a tomar los 5 primeros datos de prueba y pronosticaremos el siguiente, luego los datos 2,3,4,5,6 para pronosticar el siguiente, y así sucesivamente hasta pronosticar el ultimo. Cabe aclarar que se van a tener en total 36 pronosticaciones (ya que se toman los ultimos 5 datos de los valores de prueba) y luego se calculara el error cuadrático medio así:
+
+```{python}
+datos_prueba=data_train[-lags:]
+prueba=pd.concat([datos_prueba,data_test],axis=0) #concateno lo ultimo 5 datos de entrenamiento y se los coloco a los de prueba
+```
+
+```{python}
+
+
+predic=[]  #Predicciones un paso adelante con los datos de prueba
+for i in range(len(prueba)-lags):
+  predic.append(forecaster.predict(steps=1, last_window=prueba['yprecip'][0+i:5+i])[0] )
+
+print(len(predic))
+```
+
+```{python}
+
+origin=[]
+for j in range(len(data_test['yprecip']) ):
+  origin.append(data_test['yprecip'][j])
+print(origin)
+```
+
+## Error:
+
+```{python}
+#Riesgo empirico
+import sklearn.metrics
+sklearn.metrics.root_mean_squared_error( predic, origin )
+```
+
+predecir datos de entrenamiento y validación
+
+```{python}
+predic_train_val=[]  #Predicciones un paso adelante con los datos de prueba
+for i in range(len(data_train)-lags):
+  predic_train_val.append(forecaster.predict(steps=1, last_window=data_train['yprecip'][0+i:5+i])[0] )
+
+print(len(predic_train_val))
+```
+
+```{python}
+# Plot predicted against actual values but with train + val
+
+
+
+
+plt.close('all')
+
+from matplotlib import pyplot as plt
+
+
+plt.scatter( predic, origin, label='test', c="red")  # red (ejex predicción, ejey valor reaal de los datos de prueba )
+
+plt.scatter( predic_train_val, data_train[5:], label='test', c="green") # green (ejex predicción de los datos de entrenamiento y validacion, ejey valor reaal de los datos de entreanmiento y validacion )
+
+
+plt.show()
+```
+
+Nota para el autor: el hecho de que los puntos rojos tenga valores en el ejey menores se debe a que gráficamente la inflación en los últimos años no es tan alta como a inicios de gráfica.
+
+```{python}
+
+# Crear la gráfica
+plt.figure(figsize=(10, 6))
+
+# Graficar los datos originales
+plt.plot(origin, color='blue', label='Datos Originales', marker='o')
+
+# Graficar los datos predichos
+plt.plot(predic, color='red', label='Datos Predichos', linestyle='--', marker='x')
+
+# Etiquetas y título
+plt.xlabel('Índice')
+plt.ylabel('Valor')
+plt.title('Comparación de Datos Originales y Predichos')
+
+# Leyenda
+plt.legend()
+
+# Mostrar la gráfica
+plt.grid(True)
+plt.show()
+```
+
+# Redes neuronales multicapa
+
+Hiperparametros:
+
+-   \# neuronas
+
+-   Epocas
+
+-   Función de activación
+
+Nota: dado que nuestra serie no tiene estacionalidad entonces no usamos variables de series de furier y vamos a usar los mismos datos de test que en arboles de decisión.
+
+### Creación de variables rezagadas
+
+```{python}
+from pandas import DataFrame
+# reframe as supervised learning
+# lag observation (t-1) is the input variable and t is the output variable.
+df1 = DataFrame()
+print(df1)
+```
+
+```{python}
+for i in range(5,0,-1):
+    df1[['t-'+str(i)]] = inflacion_pd.shift(i)
+```
+
+```{python}
+print(df1) #retardos a considerar
+```
+
+```{python}
+# Create column t
+df1['t'] = inflacion_pd.values
+print(df1.head(8))
+```
+
+```{python}
+# Create a new subsetted dataframe, removing Nans from first 7 rows
+df1_infl = df1[5:]
+print(df1_infl.head(5))
+df1_infl.shape
+```
+
+```{python}
+# Split data
+
+PRESsplit = df1_infl.values
+# split into lagged variables and original time series
+X1= PRESsplit[:, 0:-1]  # slice all rows and start with column 0 and go up to but not including the last column
+y1 =PRESsplit[:,-1]  # slice all rows and last column, essentially separating out 't' column
+```
+
+```{python}
+# Separar los últimos 36 datos para el conjunto de prueba
+test_size = 36
+X_train, X_test = X1[:-test_size], X1[-test_size:]
+y_train, y_test = y1[:-test_size], y1[-test_size:]
+```
+
+```{python}
+print(X_train.shape)
+print(y_train.shape)
+print(X_test.shape)
+print(y_test.shape)
+```
+
+Normalicemos
+
+```{python}
+
+from sklearn.preprocessing import StandardScaler
+
+# Crear el scaler
+scaler = StandardScaler()
+
+# Ajustar y transformar los datos de entrenamiento
+X_train_scaled = scaler.fit_transform(X_train)
+
+# Solo transformar los datos de prueba
+X_test_scaled = scaler.transform(X_test)
+
+X_train=X_train_scaled
+X_test=X_test_scaled 
+```
+
+### Modelo
+
+se realizó una validación criuzada para calcular los hiperparametros, los cuales fueron como resultados:
+
+-   Neuronas: Capa1=20 , Capa2=15
+
+-   Epocas=50
+
+-   Función de activación= relu
+
+```{python}
+import tensorflow as tf
+import numpy as np
+import random
+
+# Fijar las semillas para reproducibilidad
+seed_value = 42
+np.random.seed(seed_value)
+tf.random.set_seed(seed_value)
+random.seed(seed_value)
+
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+from sklearn.metrics import mean_squared_error
+
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+
+
+def create_model(neurons_layer1, neurons_layer2, activation):
+    model = Sequential()
+    model.add(Dense(neurons_layer1, input_dim=X_train.shape[1], activation=activation))
+    model.add(Dense(neurons_layer2, activation=activation))
+    model.add(Dense(1))  # Capa de salida para regresión
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    return model
+
+```
+
+```{python}
+# Crear el modelo final con los mejores hiperparámetros
+final_model = create_model(neurons_layer1=20, neurons_layer2=15, activation='relu' )
+
+# Entrenar el modelo en todos los datos de entrenamiento
+final_model.fit(X_train, y_train, epochs=50, verbose=0)
+
+# Evaluar en el conjunto de prueba
+y_pred = final_model.predict(X_test)
+final_mse = mean_squared_error(y_test, y_pred)
+print(f"MSE en el conjunto de prueba: {final_mse}")
+```
+
+## Error:
+
+```{python}
+# Crear la gráfica
+plt.figure(figsize=(10, 6))
+
+# Graficar los datos originales
+plt.plot(y_test, color='blue', label='Datos Originales', marker='o')
+
+# Graficar los datos predichos
+plt.plot(y_pred, color='red', label='Datos Predichos', linestyle='--', marker='x')
+
+# Etiquetas y título
+plt.xlabel('Índice')
+plt.ylabel('Valor')
+plt.title('Comparación de Datos Originales y Predichos')
+
+# Leyenda
+plt.legend()
+
+# Mostrar la gráfica
+plt.grid(True)
+plt.show()
+```
+
+```{python}
+from matplotlib import pyplot as plt
+
+plt.close('all')
+plt.scatter(  y_pred , y_test, label='test', c="red")  # red (ejex predicción, ejey valor reaal de los datos de prueba )
+
+plt.scatter( final_model.predict(X_train), y_train, label='test', c="green") # green (ejex predicción de los datos de entrenamiento y validacion, ejey valor reaal de los datos de entreanmiento y validacion )
+
+
+plt.show()
+```
+
+Veamos que el error empírico es menor con redes neuronales que con arboles de decisión.
+
+# Redes neuronales recurrentes RNN
+
+```{python}
+use_features = ['yprecip'] # continuous input
+target = ['yprecip'] # continuous output
+n_steps_ahead =1 # pasos a predecir
+n_steps=5 #lags para predecir 
+```
+
+```{python}
+plt.plot(inflacion_pd['yprecip'])
+```
+
+Dividir la serie temporal en conjuntos de entrenamiento y prueba
+
+```{python}
+
+split = 36
+
+df_train = inflacion_pd[use_features].iloc[:-split]
+df_test = inflacion_pd[use_features].iloc[-split -n_steps :]
+
+len(df_test)
+
+```
+
+note que tenemos 41 datos de prueba y no 36, esto se debe a que cuando hagamos las predicciones se tomarán 6 para predecir los datos de test, para así tener el pronostico de 36 datos y de esta manera compararlo con los anteriores modelos
+
+Escalar
+
+```{python}
+from sklearn.preprocessing import StandardScaler
+
+# Crear un objeto StandardScaler
+scaler = StandardScaler()
+
+# Ajustar el scaler en los datos de entrenamiento y transformar los datos
+df_train_scaled = scaler.fit_transform(df_train)
+
+# Solo transformar los datos de prueba (sin ajustar nuevamente)
+df_test_scaled = scaler.transform(df_test)
+
+# Convertir los arrays de nuevo a DataFrames para conservar los índices
+df_train_scaled = pd.DataFrame(df_train_scaled, index=df_train.index, columns=df_train.columns)
+df_test_scaled = pd.DataFrame(df_test_scaled, index=df_test.index, columns=df_test.columns)
+
+
+df_train=df_train_scaled 
+df_test=df_test_scaled
+```
+
+```{python}
+def get_lagged_features(df, n_steps, n_steps_ahead):
+    """
+    df: pandas DataFrame of time series to be lagged
+    n_steps: number of lags, i.e. sequence length
+    n_steps_ahead: forecasting horizon
+    """
+    lag_list = []
+    
+    for lag in range(n_steps + n_steps_ahead - 1, n_steps_ahead - 1, -1):
+        lag_list.append(df.shift(lag))
+    lag_array = np.dstack([i[n_steps+n_steps_ahead-1:] for i in lag_list])
+    # We swap the last two dimensions so each slice along the first dimension
+    # is the same shape as the corresponding segment of the input time series 
+    lag_array = np.swapaxes(lag_array, 1, -1)
+    return lag_array
+```
+
+```{python}
+
+x_train = get_lagged_features(df_train, n_steps, n_steps_ahead)
+y_train =  df_train.values[n_steps + n_steps_ahead - 1:]
+y_train_timestamps = df_train.index[n_steps + n_steps_ahead - 1:]
+
+x_test = get_lagged_features(df_test , n_steps, n_steps_ahead)
+y_test =  df_test.values[n_steps + n_steps_ahead-1:]
+y_test_timestamps = df_test.index[n_steps + n_steps_ahead  -1:]
+```
+
+```{python}
+print([tensor.shape for tensor in (x_train, y_train, x_test, y_test)])
+```
+
+Observemos que tenemos 36 datos para probar, esto es gracias a lo comentado anteriormente.
+
+```{python}
+
+def SimpleRNN_(n_units, l1_reg, seed=0):
+  #def SimpleRNN_(n_units = 10, seed=0):
+  model = keras.models.Sequential()
+  
+  model.add(keras.layers.SimpleRNN(n_units, activation='tanh', kernel_initializer=keras.initializers.glorot_uniform(seed), bias_initializer=keras.initializers.glorot_uniform(seed), recurrent_initializer=keras.initializers.orthogonal(seed), kernel_regularizer=keras.regularizers.L1(l1_reg), input_shape=(x_train.shape[1], x_train.shape[-1]), unroll=True, stateful=False))  
+  
+  model.add(keras.layers.Dense(1, kernel_initializer=keras.initializers.glorot_uniform(seed), bias_initializer=keras.initializers.glorot_uniform(seed), kernel_regularizer=keras.regularizers.L1(l1_reg)))
+  
+  model.compile(loss='mean_squared_error', optimizer='adam')
+  return model
+
+def LSTM_(n_units, l1_reg, seed=0):
+  #def LSTM_(n_units = 10,  seed=0):
+  model = keras.models.Sequential()
+  
+  model.add(keras.layers.LSTM(n_units, activation='tanh', kernel_initializer=keras.initializers.glorot_uniform(seed), bias_initializer=keras.initializers.glorot_uniform(seed), recurrent_initializer=keras.initializers.orthogonal(seed), kernel_regularizer=keras.regularizers.L1(l1_reg), input_shape=(x_train.shape[1], x_train.shape[-1]), unroll=True)) 
+  
+  model.add(keras.layers.Dense(1, kernel_initializer=keras.initializers.glorot_uniform(seed), bias_initializer=keras.initializers.glorot_uniform(seed), kernel_regularizer=keras.regularizers.L1(l1_reg)))
+  
+  model.compile(loss='mean_squared_error', optimizer='adam')
+  return model
+```
+
+```{python}
+max_epochs = 50 #Dejar mil
+batch_size = 500
+```
+
+```{python}
+from tensorflow.keras.callbacks import EarlyStopping
+
+es = EarlyStopping(monitor='loss', mode='min', verbose=1, patience=10, min_delta=1e-7, restore_best_weights=True)
+```
+
+```{python}
+params = {
+  'rnn': {
+        'model': None, 'function': SimpleRNN_, 'l1_reg': 0.0, 'H': 20, 
+        'color': 'blue', 'label':'RNN'},
+  'lstm': {
+        'model': None, 'function': LSTM_,'l1_reg': 0.0, 'H': 10, 
+        'color':'red', 'label': 'LSTM'}
+}
+```
+
+Hiperparametros: calculo
+
+algunas librerias más:
+
+```{python}
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+import tensorflow as tf
+from datetime import timedelta
+
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import KFold, TimeSeriesSplit, GridSearchCV
+
+import tensorflow.keras as keras
+from scikeras.wrappers import KerasRegressor
+```
+
+```{python}
+params['rnn']['H']=10
+params['lstm']['H']=20
+
+params['rnn']['l1_reg']=0.1
+params['lstm']['l1_reg']=0.1
+```
+
+```{python}
+es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=10)
+do_training = True
+if do_training is True:
+    for key in params.keys():
+        tf.random.set_seed(0)
+        print('Training', key, 'model')
+        model = params[key]['function'](params[key]['H'], params[key]['l1_reg'])
+        model.fit(x_train, y_train, epochs=max_epochs, 
+                  batch_size=batch_size, callbacks=[es], shuffle=False)
+        params[key]['model'] = model
+```
+
+```{python}
+y_pred_rnn_scaled = params['rnn']['model'].predict(x_test)
+y_pred_lstm_scaled = params['lstm']['model'].predict(x_test)
+```
+
+```{python}
+# Invertir la estandarización para las predicciones
+y_pred_rnn = scaler.inverse_transform(y_pred_rnn_scaled)
+y_pred_lstm = scaler.inverse_transform(y_pred_lstm_scaled)
+
+# Invertir la estandarización para los valores reales de prueba (si es necesario)
+y_test_original = scaler.inverse_transform(y_test)
+```
+
+```{python}
+plt.figure(figsize=(10, 6))
+
+# Gráfica para el modelo RNN
+plt.plot(y_test_timestamps, y_test_original, label='Actual', color='black')
+plt.plot(y_test_timestamps, y_pred_rnn, label='RNN Prediction', color='blue')
+
+# Gráfica para el modelo LSTM
+plt.plot(y_test_timestamps, y_pred_lstm, label='LSTM Prediction', color='red')
+
+plt.xlabel('Fecha')
+plt.ylabel('Inflación')
+plt.title('Comparación de Predicciones (RNN y LSTM)')
+plt.legend()
+plt.show()
+```
+
+```{python}
+mse_rnn = mean_squared_error(y_test_original, y_pred_rnn)
+mse_lstm = mean_squared_error(y_test_original, y_pred_lstm)
+
+print(f"RNN MSE: {mse_rnn}")
+print(f"LSTM MSE: {mse_lstm}")
+
+```
+
+# Conclusión:
+
+| Modelo                        | MSE      |
+|-------------------------------|----------|
+| **Suavisamiento Exponencial** | **0.22** |
+| Árbol de decisión             | 1.25     |
+| MLP                           | 1.34     |
+| RNN                           | 0.79     |
+| LSTM                          | 2.23     |
